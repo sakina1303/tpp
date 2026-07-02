@@ -1,4 +1,7 @@
 import os
+import json
+import time
+import pandas as pd
 import google.generativeai as genai
 
 genai.configure(
@@ -8,36 +11,92 @@ genai.configure(
 model = genai.GenerativeModel("gemini-2.5-flash")
 
 
-def classify_transaction(merchant, notes):
-    prompt = f"""
-Classify this transaction into ONE category.
+def classify_transactions_batch(df):
 
-Merchant:
-{merchant}
+    all_categories = {}
 
-Notes:
-{notes}
+    batch_size = 20
 
-Return only one word.
+    for start in range(0, len(df), batch_size):
 
-Examples:
+        batch = df.iloc[start:start + batch_size]
+
+        prompt = """
+You are a financial transaction classifier.
+
+Classify EVERY transaction.
+
+Return ONLY valid JSON.
+
+Example:
+
+[
+ {"index":0,"category":"Shopping"},
+ {"index":1,"category":"Food"}
+]
+
+Categories:
+
 Shopping
 Food
 Travel
-Recharge
+Transport
+Utilities
+Cash Withdrawal
 Entertainment
-Bills
 Healthcare
 Education
+Recharge
+Bills
 Others
+
+Transactions:
+
 """
 
-    try:
+        for local_index, (_, row) in enumerate(batch.iterrows()):
 
-        response = model.generate_content(prompt)
+            prompt += f"""
 
-        return response.text.strip()
+Index: {local_index}
 
-    except Exception:
+Merchant: {row['merchant']}
 
-        return "Others"
+Notes: {row['notes']}
+
+"""
+
+        retries = 3
+
+        for attempt in range(retries):
+
+            try:
+
+                response = model.generate_content(prompt)
+
+                text = response.text.strip()
+
+                if text.startswith("```"):
+                    text = (
+                        text.replace("```json", "")
+                        .replace("```", "")
+                        .strip()
+                    )
+
+                result = json.loads(text)
+
+                for item in result:
+
+                    global_index = batch.index[item["index"]]
+
+                    all_categories[global_index] = item["category"]
+
+                break
+
+            except Exception:
+
+                print(f"Retry {attempt+1}")
+
+                time.sleep(2)
+
+    return all_categories
