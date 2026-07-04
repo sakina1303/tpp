@@ -1,13 +1,27 @@
 import os
 import shutil
 
-from fastapi import APIRouter, UploadFile, File, Depends, Query
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    Depends,
+    Query,
+    HTTPException,
+    status,
+)
+
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.job import Job
-from app.models.transaction import Transaction
 from app.models.summary import JobSummary
+from app.models.transaction import Transaction
+
+from app.schemas.job import (
+    JobResponse,
+    JobStatusResponse,
+)
 
 from app.workers.tasks import process_job
 
@@ -17,7 +31,10 @@ router = APIRouter(
 )
 
 
-@router.post("/upload")
+@router.post(
+    "/upload",
+    status_code=status.HTTP_202_ACCEPTED
+)
 async def upload_csv(
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
@@ -51,11 +68,16 @@ async def upload_csv(
         "job_id": job.id,
         "filename": job.filename,
         "status": "pending",
-        "message": "Job queued successfully"
+        "message": "Job queued successfully",
+        "status_url": f"/jobs/{job.id}/status",
+        "results_url": f"/jobs/{job.id}/results"
     }
 
 
-@router.get("")
+@router.get(
+    "",
+    response_model=list[JobResponse]
+)
 def get_jobs(
     status: str | None = Query(None),
     db: Session = Depends(get_db)
@@ -64,49 +86,69 @@ def get_jobs(
     query = db.query(Job)
 
     if status:
+        query = query.filter(Job.status == status)
 
-        query = query.filter(
-            Job.status == status
-        )
+    return (
+        query
+        .order_by(Job.id.desc())
+        .all()
+    )
 
-    return query.all()
 
-
-@router.get("/{job_id}/status")
+@router.get(
+    "/{job_id}/status",
+    response_model=JobStatusResponse
+)
 def get_job_status(
     job_id: int,
     db: Session = Depends(get_db)
 ):
 
-    job = db.query(Job).filter(
-        Job.id == job_id
-    ).first()
+    job = (
+        db.query(Job)
+        .filter(Job.id == job_id)
+        .first()
+    )
 
     if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
 
-        return {
-            "error": "Job not found"
+    summary = (
+        db.query(JobSummary)
+        .filter(JobSummary.job_id == job.id)
+        .first()
+    )
+
+    response = {
+        "job_id": job.id,
+        "filename": job.filename,
+        "status": job.status,
+        "raw_rows": job.row_count_raw,
+        "clean_rows": job.row_count_clean,
+        "created_at": job.created_at,
+        "completed_at": job.completed_at,
+        "error_message": job.error_message,
+        "summary": None
+    }
+
+    if summary:
+
+        response["summary"] = {
+
+            "risk_level": summary.risk_level,
+
+            "anomaly_count": summary.anomaly_count,
+
+            "total_spend_inr": summary.total_spend_inr,
+
+            "total_spend_usd": summary.total_spend_usd
+
         }
 
-    return {
-
-        "job_id": job.id,
-
-        "filename": job.filename,
-
-        "status": job.status,
-
-        "raw_rows": job.row_count_raw,
-
-        "clean_rows": job.row_count_clean,
-
-        "created_at": job.created_at,
-
-        "completed_at": job.completed_at,
-
-        "error_message": job.error_message
-
-    }
+    return response
 
 
 @router.get("/{job_id}/results")
@@ -115,65 +157,81 @@ def get_results(
     db: Session = Depends(get_db)
 ):
 
-    job = db.query(Job).filter(
-        Job.id == job_id
-    ).first()
+    job = (
+        db.query(Job)
+        .filter(Job.id == job_id)
+        .first()
+    )
 
     if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
 
-        return {
-            "error": "Job not found"
-        }
+    summary = (
+        db.query(JobSummary)
+        .filter(JobSummary.job_id == job_id)
+        .first()
+    )
 
-    summary = db.query(JobSummary).filter(
-        JobSummary.job_id == job_id
-    ).first()
+    transactions = (
+        db.query(Transaction)
+        .filter(Transaction.job_id == job_id)
+        .all()
+    )
 
-    transactions = db.query(Transaction).filter(
-        Transaction.job_id == job_id
-    ).all()
+    category_breakdown = {}
 
-    anomalies = [
-
-        txn
-
-        for txn in transactions
-
-        if txn.is_anomaly
-
-    ]
-
-    category_spend = {}
+    anomalies = []
 
     for txn in transactions:
 
-        category = txn.llm_category or txn.category
+        category = txn.llm_category or txn.category or "Others"
 
-        if category not in category_spend:
+        category_breakdown[category] = (
+            category_breakdown.get(category, 0)
+            + txn.amount
+        )
 
-            category_spend[category] = 0
+        if txn.is_anomaly:
 
-        category_spend[category] += txn.amount
+            anomalies.append({
+                "txn_id": txn.txn_id,
+                "merchant": txn.merchant,
+                "amount": txn.amount,
+                "reason": txn.anomaly_reason
+            })
 
     return {
 
         "job": {
 
             "id": job.id,
-
             "filename": job.filename,
-
             "status": job.status,
-
             "raw_rows": job.row_count_raw,
-
             "clean_rows": job.row_count_clean
 
         },
 
-        "summary": summary,
+        "summary": None if summary is None else {
 
-        "category_breakdown": category_spend,
+            "total_spend_inr": summary.total_spend_inr,
+
+            "total_spend_usd": summary.total_spend_usd,
+
+            "top_merchants": summary.top_merchants,
+
+            "anomaly_count": summary.anomaly_count,
+
+            "risk_level": summary.risk_level,
+
+            "narrative": summary.narrative
+
+        },
+
+        "category_breakdown": category_breakdown,
 
         "anomalies": anomalies,
 

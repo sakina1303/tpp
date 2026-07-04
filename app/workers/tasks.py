@@ -24,9 +24,6 @@ def process_job(job_id, filepath):
         if job is None:
             return
 
-        # -----------------------------
-        # Update Job Status
-        # -----------------------------
         job.status = "processing"
         db.commit()
 
@@ -37,40 +34,71 @@ def process_job(job_id, filepath):
 
         df = result["data"]
 
-        # ----------------------------------
-        # Create llm_category column
-        # ----------------------------------
-        df["llm_category"] = ""
+        # -----------------------------
+        # Initialize AI columns
+        # -----------------------------
+        df["llm_category"] = "Others"
+        df["llm_failed"] = False
 
-        # ----------------------------------
-        # Gemini classifies EVERY transaction
-        # ----------------------------------
-        category_map = classify_transactions_batch(df)
+        # -----------------------------
+        # Gemini Classification
+        # -----------------------------
+        gemini_result = classify_transactions_batch(df)
 
+        category_map = gemini_result["categories"]
+        failed_rows = gemini_result["failed_rows"]
+
+        print("\n========== CATEGORY MAP ==========")
+        print(category_map)
+        print("==================================\n")
+
+        # Fill dataframe with Gemini categories
         for index, category in category_map.items():
-            df.at[index, "llm_category"] = category
 
-        # ----------------------------------
+            if index in df.index:
+
+                df.at[index, "llm_category"] = category
+
+        # Mark rows where Gemini failed
+        for index in failed_rows:
+
+            if index in df.index:
+
+                df.at[index, "llm_failed"] = True
+
+        print("\n========== DATAFRAME AFTER GEMINI ==========")
+        print(
+            df[
+                [
+                    "merchant",
+                    "llm_category",
+                    "llm_failed"
+                ]
+            ].head(30)
+        )
+        print("============================================\n")
+
+        # -----------------------------
         # Save Transactions
-        # ----------------------------------
+        # -----------------------------
         save_transactions(
             db=db,
             df=df,
             job_id=job_id
         )
 
-        # ----------------------------------
-        # Generate AI Summary
-        # ----------------------------------
+        # -----------------------------
+        # Generate Summary
+        # -----------------------------
         generate_summary(
             db=db,
             job_id=job_id,
             df=df
         )
 
-        # ----------------------------------
+        # -----------------------------
         # Update Job
-        # ----------------------------------
+        # -----------------------------
         job.row_count_raw = result["raw_rows"]
         job.row_count_clean = result["clean_rows"]
         job.completed_at = datetime.utcnow()
@@ -78,15 +106,17 @@ def process_job(job_id, filepath):
 
         db.commit()
 
-        print(f"✅ Job {job.id} completed successfully")
+        print(f"\n✅ Job {job.id} completed successfully\n")
 
     except Exception as e:
 
         traceback.print_exc()
 
         if "job" in locals() and job:
+
             job.status = "failed"
             job.error_message = str(e)
+
             db.commit()
 
     finally:

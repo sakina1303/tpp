@@ -20,8 +20,8 @@ def save_transactions(db: Session, df, job_id):
             notes=str(row["notes"]),
             is_anomaly=bool(row["is_anomaly"]),
             anomaly_reason=str(row["anomaly_reason"]),
-            llm_category=str(row.get("llm_category", "")),
-            llm_failed=False
+            llm_category=str(row.get("llm_category", "Others")),
+            llm_failed=bool(row.get("llm_failed", False))
         )
 
         db.add(txn)

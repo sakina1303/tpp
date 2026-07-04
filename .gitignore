@@ -40,3 +40,4 @@ models/
 *.gz
 *.rar
 *.7z
+.DS_Store

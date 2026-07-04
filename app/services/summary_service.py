@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import google.generativeai as genai
 
 from app.models.summary import JobSummary
@@ -13,11 +14,17 @@ model = genai.GenerativeModel("gemini-2.5-flash")
 
 def generate_summary(db, job_id, df):
 
-    total_inr = df[df["currency"] == "INR"]["amount"].sum()
+    total_inr = float(
+        df[df["currency"] == "INR"]["amount"].sum()
+    )
 
-    total_usd = df[df["currency"] == "USD"]["amount"].sum()
+    total_usd = float(
+        df[df["currency"] == "USD"]["amount"].sum()
+    )
 
-    anomaly_count = int(df["is_anomaly"].sum())
+    anomaly_count = int(
+        df["is_anomaly"].sum()
+    )
 
     top_merchants = (
         df.groupby("merchant")["amount"]
@@ -28,16 +35,33 @@ def generate_summary(db, job_id, df):
     )
 
     prompt = f"""
-You are a financial analyst.
+You are an expert financial analyst.
+
+Analyze the transaction statistics below.
 
 Return ONLY valid JSON.
 
+Schema:
+
 {{
-  "narrative":"...",
-  "risk_level":"low"
+    "narrative":"2-3 sentence executive summary.",
+    "risk_level":"low"
 }}
 
-Information:
+Rules:
+
+- risk_level MUST be one of:
+  low
+  moderate
+  high
+
+- Mention:
+    • Total INR spend
+    • Total USD spend
+    • Top merchants
+    • Number of anomalies
+
+Statistics
 
 Total INR Spend:
 {total_inr}
@@ -49,46 +73,75 @@ Anomaly Count:
 {anomaly_count}
 
 Top Merchants:
-{top_merchants}
+{json.dumps(top_merchants)}
 """
 
     narrative = ""
     risk = "low"
 
-    try:
+    retries = 3
 
-        response = model.generate_content(prompt)
+    for attempt in range(retries):
 
-        text = response.text.strip()
+        try:
 
-        if text.startswith("```"):
-            text = (
-                text.replace("```json", "")
-                .replace("```", "")
-                .strip()
-            )
+            response = model.generate_content(prompt)
 
-        result = json.loads(text)
+            text = response.text.strip()
 
-        narrative = result["narrative"]
+            print("\n========== SUMMARY RAW ==========")
+            print(text)
+            print("=================================\n")
 
-        risk = result["risk_level"]
+            if text.startswith("```"):
+                text = (
+                    text.replace("```json", "")
+                    .replace("```", "")
+                    .strip()
+                )
 
-    except Exception:
+            result = json.loads(text)
+
+            narrative = result["narrative"]
+
+            risk = result["risk_level"].lower()
+
+            if risk not in ["low", "moderate", "high"]:
+                risk = "moderate"
+
+            break
+
+        except Exception as e:
+
+            print(f"Summary retry {attempt+1}/3")
+            print(e)
+
+            time.sleep(2)
+
+    if narrative == "":
 
         narrative = (
-            "Summary could not be generated."
+            f"Total expenditure was INR {total_inr:,.2f} "
+            f"and USD {total_usd:,.2f}. "
+            f"The highest spending merchants were "
+            f"{', '.join(top_merchants.keys())}. "
+            f"{anomaly_count} anomalous transaction(s) were detected."
         )
 
-        risk = "unknown"
+        if anomaly_count >= 10:
+            risk = "high"
+        elif anomaly_count >= 5:
+            risk = "moderate"
+        else:
+            risk = "low"
 
     summary = JobSummary(
 
         job_id=job_id,
 
-        total_spend_inr=float(total_inr),
+        total_spend_inr=total_inr,
 
-        total_spend_usd=float(total_usd),
+        total_spend_usd=total_usd,
 
         top_merchants=top_merchants,
 
@@ -96,7 +149,8 @@ Top Merchants:
 
         narrative=narrative,
 
-        risk_level=risk,
+        risk_level=risk
+
     )
 
     db.add(summary)
